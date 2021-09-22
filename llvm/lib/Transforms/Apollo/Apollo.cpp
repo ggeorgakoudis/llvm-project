@@ -40,6 +40,8 @@ static cl::list<unsigned> NumThreadsList("apollo-omp-numthreads", cl::CommaSepar
                              cl::value_desc("1, 2, 3, ..."), cl::OneOrMore);
 static cl::opt<bool> ApolloEnableOMPClause("apollo-enable-omp-clause",cl::init(false),
                                     cl::Hidden);
+static cl::opt<bool> ApolloEnableThreadInstrumentation("apollo-enable-thread-instrumentation",cl::init(false),
+                                    cl::Hidden);
 
 #define EnumAttr(Kind) Attribute::get(Ctx, Attribute::AttrKind::Kind)
 #define AttributeSet(...)                                                      \
@@ -253,34 +255,34 @@ struct Apollo : public ModulePass {
 
       assert(SrcLocStr != nullptr);
       errs() << "SrcLocStr " << ModuleSubstr << "\n";
-      GlobalVariable *GV =
+      GlobalVariable *ApolloRegionHandleGV =
           new GlobalVariable(M, IRB.getInt8PtrTy(), /*isConstant=*/false,
                              GlobalValue::PrivateLinkage,
                              ConstantPointerNull::get(IRB.getInt8PtrTy()),
                              ".apollo.region.handle." + Twine(RegionCount));
-      GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-      GV->setAlignment(Align(8));
+      ApolloRegionHandleGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+      ApolloRegionHandleGV->setAlignment(Align(8));
 
       Value *Cond = IRB.CreateICmpEQ(
-          IRB.CreateLoad(GV), ConstantPointerNull::get(IRB.getInt8PtrTy()));
+          IRB.CreateLoad(ApolloRegionHandleGV), ConstantPointerNull::get(IRB.getInt8PtrTy()));
       Instruction *ThenTI =
           SplitBlockAndInsertIfThen(Cond, ForkCI, /*Unreachable=*/false);
       IRB.SetInsertPoint(ThenTI);
       CallBase *ApolloRegionCreateCI = IRB.CreateCall(
           ApolloRegionCreate, {IRB.getInt32(LoopInitCIVector.size()), SrcLocStr,
                                IRB.getInt32(NumThreadsList.size())});
-      IRB.CreateStore(ApolloRegionCreateCI, GV);
+      IRB.CreateStore(ApolloRegionCreateCI, ApolloRegionHandleGV);
 
       // Instrument with __apollo_region_begin.
       IRB.SetInsertPoint(ForkCI);
-      IRB.CreateCall(ApolloRegionBegin, {IRB.CreateLoad(GV)});
+      IRB.CreateCall(ApolloRegionBegin, {IRB.CreateLoad(ApolloRegionHandleGV)});
       errs() << "ForkCI " << *ForkCI << "\n";
 
       // Move instruction slices before fork call to calculate number of
       // iterations of each loop as features.
       for (SmallVector<CallBase *, 4> Callpath : LoopInitCIVector) {
         // Set of visited instructions for fast lookup.
-        SmallPtrSet<Instruction *, 8> InstructionSet;
+        SmallPtrSet<Value *, 8> InstructionSet;
         // The complete instruction backtrace.
         SmallVector<Instruction *, 8> InstructionBacktrace;
         Value *UB = nullptr;
@@ -317,14 +319,24 @@ struct Apollo : public ModulePass {
               Instruction *II = dyn_cast<Instruction>(U);
               if (!II)
                 continue;
-              if (InstructionSet.count(II))
+              dbgs() << "=== Examining II " << *II << "\n";
+              if (InstructionSet.count(II)) {
+                dbgs() << "In InstructionSet continue\n";
                 continue;
-              if (!isa<StoreInst>(II))
+              }
+              if (!isa<StoreInst>(II) && !II->mayWriteToMemory()) {
+                dbgs() << "Not store, not write to mem, continue\n";
                 continue;
-              if (!DT.dominates(II, CI))
+              }
+              if (!DT.dominates(II, CI)) {
+                dbgs() << "Does not dom CI, continue\n";
                 continue;
-              if (II == I)
+              }
+              if (II == I) {
+                dbgs() << "Identical, continue\n";
                 continue;
+              }
+              dbgs() << "=== End of Examining\n";
 
               errs() << count
                      << " >>> Users User of I " << *I
@@ -374,7 +386,7 @@ struct Apollo : public ModulePass {
             CI->getParent()->getParent()->dump();
             errs() << "=== End of CI Func\n";
             Function *Callee = CI->getCalledFunction();
-            SmallPtrSet<Instruction *, 8> CallpathSet(Callpath.begin(),
+            SmallPtrSet<Value *, 8> CallpathSet(Callpath.begin(),
                                                       Callpath.end());
 
             for (unsigned ArgNo = 0, NumArgs = Callee->arg_size();
@@ -389,7 +401,8 @@ struct Apollo : public ModulePass {
                 if (!I)
                   continue;
 
-                if (!InstructionSet.count(I) && !CallpathSet.count(I)) {
+                if (!InstructionSet.count(I->stripPointerCasts()) &&
+                    !CallpathSet.count(I->stripPointerCasts())) {
                   errs() << "DID NOT find " << *U
                          << " in InstructionSet or CallpathSet\n";
                   continue;
@@ -484,6 +497,7 @@ struct Apollo : public ModulePass {
           errs() << "Slice I " << *I << "\n";
 
           if (PHINode *P = dyn_cast<PHINode>(I)) {
+            assert(false && "Cannot analyze PHINode");
             errs() << "Found PHI!\n";
             Value *V = P->getIncomingValue(0);
             assert(VMap[V] && "Expected value to be mapped");
@@ -559,14 +573,14 @@ struct Apollo : public ModulePass {
         assert(IntNumIters && "Expected non-null IntNumIters");
         Value *FloatNumIters = IRB.CreateUIToFP(IntNumIters, IRB.getFloatTy());
         IRB.CreateCall(ApolloRegionSetFeature,
-                       {IRB.CreateLoad(GV), FloatNumIters});
+                       {IRB.CreateLoad(ApolloRegionHandleGV), FloatNumIters});
       }
       errs() << "ForkCI " << *ForkCI << "\n";
 
       errs() << "====================== END OF RESULT ==========================\n";
 
       CallBase *ApolloGetPolicyCI =
-          IRB.CreateCall(ApolloGetPolicy, {IRB.CreateLoad(GV)});
+          IRB.CreateCall(ApolloGetPolicy, {IRB.CreateLoad(ApolloRegionHandleGV)});
 
       BasicBlock *ForkBB = SplitBlock(ForkCI->getParent(), ForkCI);
       IRB.SetInsertPoint(ApolloGetPolicyCI->getParent()->getTerminator());
@@ -617,7 +631,38 @@ struct Apollo : public ModulePass {
       OMPIRB.finalize();
 
       IRB.SetInsertPoint(ForkCI->getNextNode());
-      IRB.CreateCall(ApolloRegionEnd, {IRB.CreateLoad(GV)});
+      IRB.CreateCall(ApolloRegionEnd, {IRB.CreateLoad(ApolloRegionHandleGV)});
+
+      if (ApolloEnableThreadInstrumentation) {
+        FunctionCallee ApolloRegionThreadBegin = M.getOrInsertFunction(
+            "__apollo_region_thread_begin",
+            AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
+                               AttributeSet(), {}),
+            IRB.getVoidTy(), IRB.getInt8PtrTy());
+        FunctionCallee ApolloRegionThreadEnd = M.getOrInsertFunction(
+            "__apollo_region_thread_end",
+            AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
+                               AttributeSet(), {}),
+            IRB.getVoidTy(), IRB.getInt8PtrTy());
+
+        Function *OutlinedFn =
+            dyn_cast<Function>(ForkCI->getArgOperand(2)->stripPointerCasts());
+        assert(OutlinedFn && "Expected OutlinedFn in ForkCI operand");
+        IRB.SetInsertPoint(&OutlinedFn->getEntryBlock(),
+                           OutlinedFn->getEntryBlock().getFirstInsertionPt());
+        IRB.CreateCall(ApolloRegionThreadBegin,
+                       {IRB.CreateLoad(ApolloRegionHandleGV)});
+
+        // Find all return instructions in the function and instrument with
+        // __apollo_region_thread_end.
+        for (BasicBlock &BB : *OutlinedFn)
+          for (Instruction &I : BB)
+            if (dyn_cast<ReturnInst>(&I)) {
+              IRB.SetInsertPoint(&I);
+              IRB.CreateCall(ApolloRegionThreadEnd,
+                             {IRB.CreateLoad(ApolloRegionHandleGV)});
+            }
+      }
 
       RegionCount++;
       ApolloOpenMPRegionsInstrumented++;
