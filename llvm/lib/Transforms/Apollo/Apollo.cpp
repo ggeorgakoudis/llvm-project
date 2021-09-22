@@ -64,6 +64,7 @@ struct Apollo : public ModulePass {
     OpenMPIRBuilder OMPIRB(M);
     OMPIRB.initialize();
 
+    
     FunctionCallee ApolloRegionCreate = M.getOrInsertFunction(
         "__apollo_region_create",
         AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
@@ -91,7 +92,37 @@ struct Apollo : public ModulePass {
         AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
                            AttributeSet(), {}),
         IRB.getVoidTy(), IRB.getInt8PtrTy());
+    
 
+   /*
+    FunctionCallee ApolloRegionCreate = M.getOrInsertFunction(
+        "__apollo_region_create",
+        AttributeList::get(Ctx, AttributeSet(),
+                           AttributeSet(), {}),
+        IRB.getInt8PtrTy(), IRB.getInt32Ty(), IRB.getInt8PtrTy(),
+        IRB.getInt32Ty());
+    FunctionCallee ApolloRegionBegin = M.getOrInsertFunction(
+        "__apollo_region_begin",
+        AttributeList::get(Ctx, AttributeSet(),
+                           AttributeSet(), {}),
+        IRB.getVoidTy(), IRB.getInt8PtrTy());
+    FunctionCallee ApolloRegionSetFeature =
+        M.getOrInsertFunction("__apollo_region_set_feature",
+        AttributeList::get(Ctx, AttributeSet(),
+                           AttributeSet(), {}),
+        IRB.getVoidTy(),
+                              IRB.getInt8PtrTy(), IRB.getFloatTy());
+    FunctionCallee ApolloGetPolicy = M.getOrInsertFunction(
+        "__apollo_region_get_policy",
+        AttributeList::get(Ctx, AttributeSet(),
+                           AttributeSet(), {}),
+        IRB.getInt32Ty(), IRB.getInt8PtrTy());
+    FunctionCallee ApolloRegionEnd = M.getOrInsertFunction(
+        "__apollo_region_end",
+        AttributeList::get(Ctx, AttributeSet(),
+                           AttributeSet(), {}),
+        IRB.getVoidTy(), IRB.getInt8PtrTy());
+    */
     DenseMap<CallBase *, SmallVector<SmallVector<CallBase *, 4>, 4>>
         ForkCItoLoopInitCI;
 
@@ -553,6 +584,7 @@ struct Apollo : public ModulePass {
         IRB.SetInsertPoint(Case);
         OMPIRB.updateToLocation(IRB);
         // Build call __kmpc_push_num_threads(&Ident, global_tid, num_threads).
+        /*
         Value *Args[] = {
             Ident,
             ThreadID,
@@ -560,6 +592,13 @@ struct Apollo : public ModulePass {
         };
         IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
                            OMPRTL___kmpc_push_num_threads),
+                       Args);
+        */
+        Value *Args[] = {
+            IRB.getInt32(NumThreads),
+        };
+        IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
+                           OMPRTL_omp_set_num_threads),
                        Args);
         IRB.CreateBr(ForkBB);
         SwitchI->addCase(IRB.getInt32(CaseNo), Case);
