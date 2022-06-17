@@ -598,7 +598,7 @@ struct Apollo : public ModulePass {
         IRB.SetInsertPoint(Case);
         OMPIRB.updateToLocation(IRB);
         // Build call __kmpc_push_num_threads(&Ident, global_tid, num_threads).
-        /*
+        
         Value *Args[] = {
             Ident,
             ThreadID,
@@ -607,13 +607,14 @@ struct Apollo : public ModulePass {
         IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
                            OMPRTL___kmpc_push_num_threads),
                        Args);
-        */
+        /*
         Value *Args[] = {
             IRB.getInt32(NumThreads),
         };
         IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
                            OMPRTL_omp_set_num_threads),
                        Args);
+        */
         IRB.CreateBr(ForkBB);
         SwitchI->addCase(IRB.getInt32(CaseNo), Case);
       };
