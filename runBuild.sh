@@ -5,8 +5,10 @@
 #export CXX=$(which clang++)
 
 module load gcc/10.2.1
-export CC=$(which gcc)
-export CXX=$(which g++)
+CC=$(which gcc)
+CXX=$(which g++)
+CXXFLAGS="-O3 -fopenmp"
+LDFLAGS=""
 
 module load ninja/1.9.0
 

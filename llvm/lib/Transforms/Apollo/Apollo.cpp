@@ -72,7 +72,8 @@ struct Apollo : public ModulePass {
         AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
                            AttributeSet(), {}),
         IRB.getInt8PtrTy(), IRB.getInt32Ty(), IRB.getInt8PtrTy(),
-        IRB.getInt32Ty());
+        IRB.getInt32Ty(), IRB.getInt32Ty(), IRB.getInt8PtrTy());
+
     FunctionCallee ApolloRegionBegin = M.getOrInsertFunction(
         "__apollo_region_begin",
         AttributeList::get(Ctx, AttributeSet(EnumAttr(ArgMemOnly)),
@@ -270,7 +271,7 @@ struct Apollo : public ModulePass {
       IRB.SetInsertPoint(ThenTI);
       CallBase *ApolloRegionCreateCI = IRB.CreateCall(
           ApolloRegionCreate, {IRB.getInt32(LoopInitCIVector.size()), SrcLocStr,
-                               IRB.getInt32(NumThreadsList.size())});
+                               IRB.getInt32(NumThreadsList.size()), IRB.getInt32(0), IRB.CreateGlobalStringPtr("")});
       IRB.CreateStore(ApolloRegionCreateCI, ApolloRegionHandleGV);
 
       // Instrument with __apollo_region_begin.
