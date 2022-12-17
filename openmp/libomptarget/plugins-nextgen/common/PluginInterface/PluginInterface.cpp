@@ -427,9 +427,9 @@ GenericDeviceTy::loadBinary(GenericPluginTy &Plugin,
     return ImageOrErr.takeError();
 
   DeviceImageTy *Image = *ImageOrErr;
+  assert(Image != nullptr && "Invalid image");
   if (isBitcodeImage)
     Image->setTgtImageBitcode(InputTgtImage);
-  assert(Image != nullptr && "Invalid image");
 
   // Add the image to list.
   LoadedImages.push_back(Image);
