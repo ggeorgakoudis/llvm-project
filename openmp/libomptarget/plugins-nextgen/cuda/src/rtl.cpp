@@ -357,7 +357,7 @@ struct CUDADeviceTy : public GenericDeviceTy {
     GenericGlobalHandlerTy &GHandler = Plugin::get().getGlobalHandler();
     if (auto Err = GHandler.readGlobalFromImage(*this, Image, ExecModeGlobal)) {
       // In some cases the execution mode is not included, so use the default.
-      ExecModeGlobal.setValue(llvm::omp::OMP_TGT_EXEC_MODE_GENERIC);
+      ExecModeGlobal.setValue(llvm::omp::OMP_TGT_EXEC_MODE_SPMD);
       // Consume the error since it is acceptable to fail.
       [[maybe_unused]] std::string ErrStr = toString(std::move(Err));
 
