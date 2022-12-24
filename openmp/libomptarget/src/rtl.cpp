@@ -250,6 +250,8 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
       DynLibrary->getAddressOfSymbol("__tgt_rtl_data_lock");
   *((void **)&RTL.data_unlock) =
       DynLibrary->getAddressOfSymbol("__tgt_rtl_data_unlock");
+  *((void **)&RTL.initialize_recorded_globals) =
+      DynLibrary->getAddressOfSymbol("__tgt_rtl_initialize_recorded_globals");
 
   RTL.LibraryHandler = std::move(DynLibrary);
 
