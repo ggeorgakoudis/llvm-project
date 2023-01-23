@@ -38,6 +38,11 @@ STATISTIC(ApolloOpenMPRegionsInstrumented,
 static cl::list<unsigned> NumThreadsList("apollo-omp-numthreads", cl::CommaSeparated,
                              cl::desc("Num threads for OpenMP tuning"),
                              cl::value_desc("1, 2, 3, ..."), cl::OneOrMore);
+
+static cl::list<std::string> ProcBindList("apollo-omp-procbinds", cl::CommaSeparated,
+                             cl::desc("OMP proc bind tuning options"),
+                             cl::value_desc("close, spread, primary"), cl::OneOrMore);
+
 static cl::opt<bool> ApolloEnableOMPClause("apollo-enable-omp-clause",cl::init(false),
                                     cl::Hidden);
 static cl::opt<bool> ApolloEnableThreadInstrumentation("apollo-enable-thread-instrumentation",cl::init(false),
@@ -46,6 +51,7 @@ static cl::opt<bool> ApolloEnableThreadInstrumentation("apollo-enable-thread-ins
 #define EnumAttr(Kind) Attribute::get(Ctx, Attribute::AttrKind::Kind)
 #define AttributeSet(...)                                                      \
   AttributeSet::get(Ctx, ArrayRef<Attribute>({__VA_ARGS__}))
+
 
 namespace {
 struct Apollo : public ModulePass {
@@ -66,6 +72,12 @@ struct Apollo : public ModulePass {
     OpenMPIRBuilder OMPIRB(M);
     OMPIRB.initialize();
 
+    std::map<std::string, std::underlying_type<omp::ProcBindKind>::type> procBindsMap;
+    procBindsMap["master"] = static_cast<std::underlying_type<omp::ProcBindKind>::type>(OMP_PROC_BIND_master);
+    procBindsMap["close"] = static_cast<std::underlying_type<omp::ProcBindKind>::type>(OMP_PROC_BIND_close);
+    procBindsMap["spread"] = static_cast<std::underlying_type<omp::ProcBindKind>::type>(OMP_PROC_BIND_spread);
+    procBindsMap["default"] = static_cast<std::underlying_type<omp::ProcBindKind>::type>(OMP_PROC_BIND_default);
+    procBindsMap["unknown"] = static_cast<std::underlying_type<omp::ProcBindKind>::type>(OMP_PROC_BIND_unknown);
     
     FunctionCallee ApolloRegionCreate = M.getOrInsertFunction(
         "__apollo_region_create",
@@ -269,9 +281,13 @@ struct Apollo : public ModulePass {
       Instruction *ThenTI =
           SplitBlockAndInsertIfThen(Cond, ForkCI, /*Unreachable=*/false);
       IRB.SetInsertPoint(ThenTI);
+
+      // the number of static policies is a multiple of the number of thread options and proc bindings
       CallBase *ApolloRegionCreateCI = IRB.CreateCall(
           ApolloRegionCreate, {IRB.getInt32(LoopInitCIVector.size()), SrcLocStr,
-                               IRB.getInt32(NumThreadsList.size()), IRB.getInt32(0), IRB.CreateGlobalStringPtr("")});
+                               IRB.getInt32(ProcBindList.size() * NumThreadsList.size()), 
+                               IRB.getInt32(0), IRB.CreateGlobalStringPtr("")});
+                               
       IRB.CreateStore(ApolloRegionCreateCI, ApolloRegionHandleGV);
 
       // Instrument with __apollo_region_begin.
@@ -580,19 +596,83 @@ struct Apollo : public ModulePass {
 
       errs() << "====================== END OF RESULT ==========================\n";
 
+      // get the actual policy value from the getPolicy call
       CallBase *ApolloGetPolicyCI =
           IRB.CreateCall(ApolloGetPolicy, {IRB.CreateLoad(ApolloRegionHandleGV)});
 
+      // Split the fork method at the fork instruction
       BasicBlock *ForkBB = SplitBlock(ForkCI->getParent(), ForkCI);
+
+      // get the terminator instruction of the enclosing method
+      // specifies that created instructions will be appended to this BasicBlock (BB)
       IRB.SetInsertPoint(ApolloGetPolicyCI->getParent()->getTerminator());
+
+      // get the OMP IR Builder to the same location as the IRBuilder
       OMPIRB.updateToLocation(IRB);
+
+      // Get context information for making the kmpc call
       SrcLocStr = OMPIRB.getOrCreateSrcLocStr(IRB);
       Value *Ident = OMPIRB.getOrCreateIdent(SrcLocStr);
       Value *ThreadID = OMPIRB.getOrCreateThreadID(Ident);
+
+      // Create a switch right before the fork block and after the get_policy block
       SwitchInst *SwitchI = IRB.CreateSwitch(ApolloGetPolicyCI, ForkBB);
       ApolloGetPolicyCI->getParent()->getTerminator()->eraseFromParent();
 
-      auto CreateCase = [&](int CaseNo, int NumThreads) {
+      auto CreateCase = [&](int CaseNo, int NumThreadsIdx, int ProcBindIdx) {
+        // create a new BB right above the fork
+        BasicBlock *Case =
+            BasicBlock::Create(Ctx, ".apollo.case." + Twine(CaseNo),
+                               ForkBB->getParent(), ForkBB);
+        IRB.SetInsertPoint(Case);
+        OMPIRB.updateToLocation(IRB);
+        // Build call __kmpc_push_num_threads(&Ident, global_tid, num_threads).
+        
+        Value *Args[] = {
+            Ident,
+            ThreadID,
+            IRB.getInt32(NumThreadsList[NumThreadsIdx]),
+        };
+        IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
+                           OMPRTL___kmpc_push_num_threads),
+                       Args);
+
+        Value *PBArgs[] = {
+            Ident,
+            ThreadID,
+            IRB.getInt32(procBindsMap[ProcBindList[ProcBindIdx]]),
+        };
+        IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
+                           OMPRTL___kmpc_push_proc_bind),
+                       PBArgs);
+
+        IRB.CreateBr(ForkBB);
+        SwitchI->addCase(IRB.getInt32(CaseNo), Case);
+      };
+
+      // Create different number of threads cases.
+      // Create the calls for the different policies, that are now a mixutre
+      // of the number of threads and proc bindings
+      unsigned int CaseNo = 0;
+      unsigned int numThreadsInList = NumThreadsList.size();
+      unsigned int numProcBindsInList = ProcBindList.size();
+
+      // We make a table of the threads and proc bins
+      // Rows --> thread counts
+      // Cols --> proc binds
+      for (CaseNo = 0; CaseNo < numThreadsInList*numProcBindsInList; ++CaseNo) {
+        unsigned int NumThreadsIdx = CaseNo / numProcBindsInList;
+        unsigned int ProcBindIdx = CaseNo % numProcBindsInList;
+        errs() << " {" << NumThreadsIdx << ", " << ProcBindIdx << "}" << "\n";
+        CreateCase(CaseNo, NumThreadsIdx, ProcBindIdx);
+      }
+
+      assert(CaseNo == NumThreadsList.size()*ProcBindList.size() &&
+             "Expected the some number of cases and number of threads in the "
+             "list");
+
+/*       // Add the proc bind switches
+      auto CreateProcBindCase = [&](int CaseNo, std::string ProcBind) {
         BasicBlock *Case =
             BasicBlock::Create(Ctx, ".apollo.case." + Twine(CaseNo),
                                ForkBB->getParent(), ForkBB);
@@ -608,27 +688,17 @@ struct Apollo : public ModulePass {
         IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
                            OMPRTL___kmpc_push_num_threads),
                        Args);
-        /*
-        Value *Args[] = {
-            IRB.getInt32(NumThreads),
-        };
-        IRB.CreateCall(OMPIRB.getOrCreateRuntimeFunctionPtr(
-                           OMPRTL_omp_set_num_threads),
-                       Args);
-        */
         IRB.CreateBr(ForkBB);
         SwitchI->addCase(IRB.getInt32(CaseNo), Case);
-      };
+      }; */
 
-      // Create different number of threads cases.
-      unsigned int CaseNo = 0;
-      for (unsigned NumThreads : NumThreadsList) {
-        CreateCase(CaseNo, NumThreads);
-        CaseNo++;
+      // we have master, close, spread, default, unknown
+
+      for (std::string ProcBind : ProcBindList){
+        errs() << "Got PROC-BIND: '" << ProcBind << "'\n";
+        errs() << "\t" << ProcBind << " maps to " << procBindsMap[ProcBind] << "\n";
+
       }
-      assert(CaseNo == NumThreadsList.size() &&
-             "Expected the some number of cases and number of threads in the "
-             "list");
 
       OMPIRB.finalize();
 
