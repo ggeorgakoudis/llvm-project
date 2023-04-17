@@ -292,7 +292,9 @@ struct Apollo : public ModulePass {
 
       // Instrument with __apollo_region_begin.
       IRB.SetInsertPoint(ForkCI);
+#if 0
       IRB.CreateCall(ApolloRegionBegin, {IRB.CreateLoad(ApolloRegionHandleGV)});
+#endif
       errs() << "ForkCI " << *ForkCI << "\n";
 
       // Move instruction slices before fork call to calculate number of
@@ -508,6 +510,7 @@ struct Apollo : public ModulePass {
         // remapping them is correct, because instructions insert in program
         // order
         Value *UBClone = nullptr;
+#if 0
         for (auto It = InstructionBacktrace.begin();
              It < InstructionBacktrace.end(); ++It) {
           Instruction *I = *It;
@@ -568,7 +571,8 @@ struct Apollo : public ModulePass {
 
           errs() << "CloneI " << *CloneI << "\n\n";
         }
-
+#endif
+#if 0
         assert(UBClone != nullptr);
 
         errs() << "UBClone I " << *UBClone << "\n";
@@ -586,17 +590,21 @@ struct Apollo : public ModulePass {
         // UB clone is a scalar in dynamic scheduling.
         else
           IntNumIters = IRB.CreateAdd(UBClone, ConstantInt::get(UBType, 1));
-
         assert(IntNumIters && "Expected non-null IntNumIters");
         Value *FloatNumIters = IRB.CreateUIToFP(IntNumIters, IRB.getFloatTy());
+#endif
+#if 0
         IRB.CreateCall(ApolloRegionSetFeature,
-                       {IRB.CreateLoad(ApolloRegionHandleGV), FloatNumIters});
+                       {IRB.CreateLoad(ApolloRegionHandleGV), ConstantFP::get(IRB.getFloatTy(), 0.0)});
+                       //{IRB.CreateLoad(ApolloRegionHandleGV), FloatNumIters});
+#endif
       }
       errs() << "ForkCI " << *ForkCI << "\n";
 
       errs() << "====================== END OF RESULT ==========================\n";
 
       // get the actual policy value from the getPolicy call
+#if 0
       CallBase *ApolloGetPolicyCI =
           IRB.CreateCall(ApolloGetPolicy, {IRB.CreateLoad(ApolloRegionHandleGV)});
 
@@ -674,6 +682,7 @@ struct Apollo : public ModulePass {
              "Expected the some number of cases and number of threads in the "
              "list");
 
+#endif
 /*       // Add the proc bind switches
       auto CreateProcBindCase = [&](int CaseNo, std::string ProcBind) {
         BasicBlock *Case =
@@ -706,7 +715,9 @@ struct Apollo : public ModulePass {
       OMPIRB.finalize();
 
       IRB.SetInsertPoint(ForkCI->getNextNode());
+#if 0
       IRB.CreateCall(ApolloRegionEnd, {IRB.CreateLoad(ApolloRegionHandleGV)});
+#endif
 
       if (ApolloEnableThreadInstrumentation) {
         FunctionCallee ApolloRegionThreadBegin = M.getOrInsertFunction(
