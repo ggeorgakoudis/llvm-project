@@ -10,6 +10,7 @@
 //
 // NetBSD does not support LC_MONETARY at the moment
 // XFAIL: netbsd
+// XFAIL: LIBCXX-AIX-FIXME
 
 // XFAIL: LIBCXX-WINDOWS-FIXME
 
@@ -47,6 +48,7 @@ public:
         : std::moneypunct_byname<char, true>(nm, refs) {}
 };
 
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
 class Fwf
     : public std::moneypunct_byname<wchar_t, false>
 {
@@ -62,6 +64,7 @@ public:
     explicit Fwt(const std::string& nm, std::size_t refs = 0)
         : std::moneypunct_byname<wchar_t, true>(nm, refs) {}
 };
+#endif // TEST_HAS_NO_WIDE_CHARACTERS
 
 int main(int, char**)
 {
@@ -76,6 +79,7 @@ int main(int, char**)
         Fnt f("C", 1);
         assert(f.grouping() == s || f.grouping() == "");
     }
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
     {
         Fwf f("C", 1);
         assert(f.grouping() == s || f.grouping() == "");
@@ -84,6 +88,7 @@ int main(int, char**)
         Fwt f("C", 1);
         assert(f.grouping() == s || f.grouping() == "");
     }
+#endif
 
     {
         Fnf f(LOCALE_en_US_UTF_8, 1);
@@ -93,6 +98,7 @@ int main(int, char**)
         Fnt f(LOCALE_en_US_UTF_8, 1);
         assert(f.grouping() == "\3\3");
     }
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
     {
         Fwf f(LOCALE_en_US_UTF_8, 1);
         assert(f.grouping() == "\3\3");
@@ -101,6 +107,7 @@ int main(int, char**)
         Fwt f(LOCALE_en_US_UTF_8, 1);
         assert(f.grouping() == "\3\3");
     }
+#endif
 
     {
         Fnf f(LOCALE_fr_FR_UTF_8, 1);
@@ -110,6 +117,7 @@ int main(int, char**)
         Fnt f(LOCALE_fr_FR_UTF_8, 1);
         assert(f.grouping() == "\3");
     }
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
     {
         Fwf f(LOCALE_fr_FR_UTF_8, 1);
         assert(f.grouping() == "\3");
@@ -118,6 +126,7 @@ int main(int, char**)
         Fwt f(LOCALE_fr_FR_UTF_8, 1);
         assert(f.grouping() == "\3");
     }
+#endif
 
     {
         Fnf f(LOCALE_ru_RU_UTF_8, 1);
@@ -127,6 +136,7 @@ int main(int, char**)
         Fnt f(LOCALE_ru_RU_UTF_8, 1);
         assert(f.grouping() == "\3\3");
     }
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
     {
         Fwf f(LOCALE_ru_RU_UTF_8, 1);
         assert(f.grouping() == "\3\3");
@@ -135,6 +145,7 @@ int main(int, char**)
         Fwt f(LOCALE_ru_RU_UTF_8, 1);
         assert(f.grouping() == "\3\3");
     }
+#endif
 
     {
         Fnf f(LOCALE_zh_CN_UTF_8, 1);
@@ -144,6 +155,7 @@ int main(int, char**)
         Fnt f(LOCALE_zh_CN_UTF_8, 1);
         assert(f.grouping() == "\3");
     }
+#ifndef TEST_HAS_NO_WIDE_CHARACTERS
     {
         Fwf f(LOCALE_zh_CN_UTF_8, 1);
         assert(f.grouping() == "\3");
@@ -152,6 +164,7 @@ int main(int, char**)
         Fwt f(LOCALE_zh_CN_UTF_8, 1);
         assert(f.grouping() == "\3");
     }
+#endif
 
   return 0;
 }

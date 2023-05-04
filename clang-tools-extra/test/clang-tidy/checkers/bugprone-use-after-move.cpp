@@ -416,6 +416,13 @@ void lambdas() {
     auto lambda = [&]() { a.foo(); };
     std::move(a);
   }
+  {
+    A a;
+    auto lambda = [a = std::move(a)] { a.foo(); };
+    a.foo();
+    // CHECK-NOTES: [[@LINE-1]]:5: warning: 'a' used after it was moved
+    // CHECK-NOTES: [[@LINE-3]]:24: note: move occurred here
+  }
 }
 
 // Use-after-moves are detected in uninstantiated templates if the moved type
@@ -1338,3 +1345,15 @@ void typeId() {
   Foo Other{std::move(Bar)};
 }
 } // namespace UnevalContext
+
+class PR38187 {
+public:
+  PR38187(std::string val) : val_(std::move(val)) {
+    val.empty();
+    // CHECK-NOTES: [[@LINE-1]]:5: warning: 'val' used after it was moved
+    // CHECK-NOTES: [[@LINE-3]]:30: note: move occurred here
+  }
+
+private:
+  std::string val_;
+};

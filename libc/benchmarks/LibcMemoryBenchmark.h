@@ -13,6 +13,7 @@
 #define LLVM_LIBC_UTILS_BENCHMARK_MEMORY_BENCHMARK_H
 
 #include "LibcBenchmark.h"
+#include "LibcFunctionPrototypes.h"
 #include "MemorySizeDistributions.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Alignment.h"
@@ -105,7 +106,8 @@ class AlignedBuffer {
   size_t Size = 0;
 
 public:
-  static constexpr size_t Alignment = 1024;
+  // Note: msan / asan can't handle Alignment > 512.
+  static constexpr size_t Alignment = 512;
 
   explicit AlignedBuffer(size_t Size)
       : Buffer(static_cast<char *>(aligned_alloc(Alignment, Size))),
@@ -187,15 +189,15 @@ struct ParameterBatch {
 
 /// Provides source and destination buffers for the Copy operation as well as
 /// the associated size distributions.
-struct CopyHarness : public ParameterBatch {
-  CopyHarness();
+struct CopySetup : public ParameterBatch {
+  CopySetup();
 
-  static const ArrayRef<MemorySizeDistribution> Distributions;
+  inline static const ArrayRef<MemorySizeDistribution> getDistributions() {
+    return getMemcpySizeDistributions();
+  }
 
-  inline void *Call(ParameterType Parameter,
-                    void *(*memcpy)(void *__restrict, const void *__restrict,
-                                    size_t)) {
-    return memcpy(DstBuffer + Parameter.OffsetBytes,
+  inline void *Call(ParameterType Parameter, MemcpyFunction Memcpy) {
+    return Memcpy(DstBuffer + Parameter.OffsetBytes,
                   SrcBuffer + Parameter.OffsetBytes, Parameter.SizeBytes);
   }
 
@@ -204,21 +206,40 @@ private:
   AlignedBuffer DstBuffer;
 };
 
+/// Provides source and destination buffers for the Move operation as well as
+/// the associated size distributions.
+struct MoveSetup : public ParameterBatch {
+  MoveSetup();
+
+  inline static const ArrayRef<MemorySizeDistribution> getDistributions() {
+    return getMemmoveSizeDistributions();
+  }
+
+  inline void *Call(ParameterType Parameter, MemmoveFunction Memmove) {
+    return Memmove(Buffer + ParameterBatch::BufferSize / 3,
+                   Buffer + Parameter.OffsetBytes, Parameter.SizeBytes);
+  }
+
+private:
+  AlignedBuffer Buffer;
+};
+
 /// Provides destination buffer for the Set operation as well as the associated
 /// size distributions.
-struct SetHarness : public ParameterBatch {
-  SetHarness();
+struct SetSetup : public ParameterBatch {
+  SetSetup();
 
-  static const ArrayRef<MemorySizeDistribution> Distributions;
+  inline static const ArrayRef<MemorySizeDistribution> getDistributions() {
+    return getMemsetSizeDistributions();
+  }
 
-  inline void *Call(ParameterType Parameter,
-                    void *(*memset)(void *, int, size_t)) {
-    return memset(DstBuffer + Parameter.OffsetBytes,
+  inline void *Call(ParameterType Parameter, MemsetFunction Memset) {
+    return Memset(DstBuffer + Parameter.OffsetBytes,
                   Parameter.OffsetBytes % 0xFF, Parameter.SizeBytes);
   }
 
-  inline void *Call(ParameterType Parameter, void (*bzero)(void *, size_t)) {
-    bzero(DstBuffer + Parameter.OffsetBytes, Parameter.SizeBytes);
+  inline void *Call(ParameterType Parameter, BzeroFunction Bzero) {
+    Bzero(DstBuffer + Parameter.OffsetBytes, Parameter.SizeBytes);
     return DstBuffer.begin();
   }
 
@@ -228,15 +249,16 @@ private:
 
 /// Provides left and right buffers for the Comparison operation as well as the
 /// associated size distributions.
-struct ComparisonHarness : public ParameterBatch {
-  ComparisonHarness();
+struct ComparisonSetup : public ParameterBatch {
+  ComparisonSetup();
 
-  static const ArrayRef<MemorySizeDistribution> Distributions;
+  inline static const ArrayRef<MemorySizeDistribution> getDistributions() {
+    return getMemcmpSizeDistributions();
+  }
 
-  inline int Call(ParameterType Parameter,
-                  int (*memcmp)(const void *, const void *, size_t)) {
-    return memcmp(LhsBuffer + Parameter.OffsetBytes,
-                  RhsBuffer + Parameter.OffsetBytes, Parameter.SizeBytes);
+  inline int Call(ParameterType Parameter, MemcmpOrBcmpFunction MemcmpOrBcmp) {
+    return MemcmpOrBcmp(LhsBuffer + Parameter.OffsetBytes,
+                        RhsBuffer + Parameter.OffsetBytes, Parameter.SizeBytes);
   }
 
 private:

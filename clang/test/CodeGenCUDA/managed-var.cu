@@ -1,5 +1,3 @@
-// REQUIRES: x86-registered-target, amdgpu-registered-target
-
 // RUN: %clang_cc1 -triple amdgcn-amd-amdhsa -fcuda-is-device -std=c++11 \
 // RUN:   -emit-llvm -o - -x hip %s | FileCheck \
 // RUN:   -check-prefixes=COMMON,DEV,NORDC-D %s
