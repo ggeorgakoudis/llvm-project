@@ -343,8 +343,9 @@ void CGIntrinsicsOpenMP::emitOMPParallelHostRuntime(
         assert(false &&
                "Unsupported type to init with idempotent reduction value");
 
-      ReductionInfos.push_back({&Orig, V, CGReduction::sumReduction,
-                                CGReduction::sumAtomicReduction});
+      //ReductionInfos.push_back({&Orig, V, CGReduction::sumReduction,
+      ReductionInfos.push_back(OpenMPIRBuilder::ReductionInfo(VTy, &Orig, V, CGReduction::sumReduction,
+                                CGReduction::sumAtomicReduction));
 
       return OMPBuilder.Builder.saveIP();
     } else {
@@ -404,7 +405,8 @@ void CGIntrinsicsOpenMP::emitOMPParallelHostRuntime(
   BranchInst::Create(AfterBB, AfterIP.getBlock());
 
   LLVM_DEBUG(dbgs() << "=== Before Fn\n" << *Fn << "=== End of Before Fn\n");
-  OMPBuilder.finalize(Fn, /* AllowExtractorSinking */ true);
+  OMPBuilder.finalize(Fn);
+  //OMPBuilder.finalize(Fn, /* AllowExtractorSinking */ true);
   LLVM_DEBUG(dbgs() << "=== Finalize Fn\n"
                     << *Fn << "=== End of Finalize Fn\n");
 }
@@ -503,7 +505,8 @@ void CGIntrinsicsOpenMP::emitOMPParallelDeviceRuntime(
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(BBEntry, BBEntry->end()), DL);
 
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
   OMPBuilder.Builder.restoreIP(Loc.IP);
   OMPBuilder.Builder.SetCurrentDebugLocation(Loc.DL);
 
@@ -547,7 +550,7 @@ void CGIntrinsicsOpenMP::emitOMPParallelDeviceRuntime(
     OMPBuilder.Builder.CreateStore(Bitcast, GEP);
   }
 
-  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
   Value *ThreadID = OMPBuilder.getOrCreateThreadID(Ident);
 
   Value *IfCondition = ParRegionInfo.IfCondition;
@@ -632,8 +635,9 @@ void CGIntrinsicsOpenMP::emitOMPFor(MapVector<Value *, DSAType> &DSAValueMap,
   const DebugLoc DL = PreHeader->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(PreHeader, PreHeader->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   // Create allocas for static init values.
   // TODO: Move the AllocaIP to the start of the containing function.
@@ -704,9 +708,9 @@ void CGIntrinsicsOpenMP::emitOMPFor(MapVector<Value *, DSAType> &DSAValueMap,
           report_fatal_error(
               "Unsupported type to init with idempotent reduction value");
 
-        ReductionInfos.push_back({Orig, ReplacementValue,
+        ReductionInfos.push_back(OpenMPIRBuilder::ReductionInfo(VTy, Orig, ReplacementValue,
                                   CGReduction::sumReduction,
-                                  CGReduction::sumAtomicReduction});
+                                  CGReduction::sumAtomicReduction));
       } else
         assert(false && "Unsupported privatization");
 
@@ -875,8 +879,9 @@ void CGIntrinsicsOpenMP::emitOMPTask(MapVector<Value *, DSAType> &DSAValueMap,
     const DebugLoc DL = BBEntry->getTerminator()->getDebugLoc();
     OpenMPIRBuilder::LocationDescription Loc(
         InsertPointTy(BBEntry, BBEntry->getTerminator()->getIterator()), DL);
-    Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-    Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+    uint32_t SrcLocStrSize;
+    Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+    Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
     // TODO: parse clauses, for now fix flags to tied
     unsigned TaskFlags = TiedFlag;
     Value *SizeofShareds = nullptr;
@@ -1117,8 +1122,9 @@ void CGIntrinsicsOpenMP::emitOMPOffloadingMappings(
                               Value *Ptr) {
     OffloadMapTypes.push_back(ConstantInt::get(OMPBuilder.SizeTy, MapType));
     // TODO: maybe add debug info.
+    uint32_t SrcLocStrSize;
     OffloadMapNames.push_back(
-        OMPBuilder.getOrCreateSrcLocStr(BasePtr->getName(), "", 0, 0));
+        OMPBuilder.getOrCreateSrcLocStr(BasePtr->getName(), "", 0, 0, SrcLocStrSize));
     LLVM_DEBUG(dbgs() << "Emit mapping entry BasePtr " << *BasePtr << " Ptr "
                       << *Ptr << " Size " << *Size << " MapType " << MapType
                       << "\n");
@@ -1613,8 +1619,9 @@ void CGIntrinsicsOpenMP::emitOMPTargetHost(
   const DebugLoc DL = EntryBB->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(EntryBB, EntryBB->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   // TODO: should we use target_mapper without teams or the more general
   // target_teams_mapper. Does the former buy us anything (less overhead?)
@@ -1771,11 +1778,12 @@ void CGIntrinsicsOpenMP::emitOMPTeamsDeviceRuntime(
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(BBEntry, BBEntry->end()), DL);
 
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
   OMPBuilder.Builder.restoreIP(Loc.IP);
   OMPBuilder.Builder.SetCurrentDebugLocation(Loc.DL);
 
-  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
   Value *ThreadID = OMPBuilder.getOrCreateThreadID(Ident);
 
   assert(Ident && "Expected non-null Ident");
@@ -1852,11 +1860,12 @@ void CGIntrinsicsOpenMP::emitOMPTeamsHostRuntime(MapVector<Value *, DSAType> &DS
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(BBEntry, BBEntry->end()), DL);
 
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
   OMPBuilder.Builder.restoreIP(Loc.IP);
   OMPBuilder.Builder.SetCurrentDebugLocation(Loc.DL);
 
-  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  Value *Ident = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
   Value *ThreadID = OMPBuilder.getOrCreateThreadID(Ident);
 
   assert(Ident && "Expected non-null Ident");
@@ -1919,8 +1928,9 @@ void CGIntrinsicsOpenMP::emitOMPTargetEnterData(
   const DebugLoc DL = BBEntry->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(BBEntry, BBEntry->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   FunctionCallee TargetDataBeginMapper =
       OMPBuilder.getOrCreateRuntimeFunction(M, OMPRTL___tgt_target_data_begin_mapper);
@@ -1952,8 +1962,9 @@ void CGIntrinsicsOpenMP::emitOMPTargetExitData(
   const DebugLoc DL = BBEntry->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(BBEntry, BBEntry->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   FunctionCallee TargetDataEndMapper =
       OMPBuilder.getOrCreateRuntimeFunction(M, OMPRTL___tgt_target_data_end_mapper);
@@ -2006,8 +2017,9 @@ void CGIntrinsicsOpenMP::emitOMPDistribute(
   const DebugLoc DL = PreHeader->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(PreHeader, PreHeader->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   // Create allocas for static init values.
   InsertPointTy AllocaIP(PreHeader, PreHeader->getFirstInsertionPt());
@@ -2157,8 +2169,9 @@ void CGIntrinsicsOpenMP::emitOMPDistributeParallelFor(
   const DebugLoc DL = PreHeader->getTerminator()->getDebugLoc();
   OpenMPIRBuilder::LocationDescription Loc(
       InsertPointTy(PreHeader, PreHeader->getTerminator()->getIterator()), DL);
-  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc);
-  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr);
+  uint32_t SrcLocStrSize;
+  Constant *SrcLocStr = OMPBuilder.getOrCreateSrcLocStr(Loc, SrcLocStrSize);
+  Value *SrcLoc = OMPBuilder.getOrCreateIdent(SrcLocStr, SrcLocStrSize);
 
   // Create basic block structure.
   BasicBlock *ForEntry =
