@@ -344,8 +344,8 @@ void CGIntrinsicsOpenMP::emitOMPParallelHostRuntime(
                "Unsupported type to init with idempotent reduction value");
 
       //ReductionInfos.push_back({&Orig, V, CGReduction::sumReduction,
-      ReductionInfos.push_back(OpenMPIRBuilder::ReductionInfo(VTy, &Orig, V, CGReduction::sumReduction,
-                                CGReduction::sumAtomicReduction));
+      ReductionInfos.push_back(OpenMPIRBuilder::ReductionInfo(VTy, &Orig, V,
+                         CGReduction::sumReduction, CGReduction::sumAtomicReduction));
 
       return OMPBuilder.Builder.saveIP();
     } else {
