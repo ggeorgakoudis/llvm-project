@@ -11244,33 +11244,24 @@ struct AAPotentialValuesFloating : AAPotentialValuesImpl {
   /// in that case Worklist will be updated.
   bool handleGenericInst(Attributor &A, Instruction &I, ItemInfo II,
                          SmallVectorImpl<ItemInfo> &Worklist) {
-    bool SomeSimplified = false;
     bool UsedAssumedInformation = false;
 
-    SmallVector<Value *, 8> NewOps(I.getNumOperands());
+    SmallVector<SmallVector<AA::ValueAndContext>, 8> NewOps(I.getNumOperands());
     int Idx = 0;
     for (Value *Op : I.operands()) {
-      const auto &SimplifiedOp = A.getAssumedSimplified(
-          IRPosition::value(*Op, getCallBaseContext()), *this,
-          UsedAssumedInformation, AA::Intraprocedural);
+      if (!A.getAssumedSimplifiedValues(
+              IRPosition::value(*Op, getCallBaseContext()), this, NewOps[Idx],
+              AA::AnyScope, UsedAssumedInformation)) {
+        NewOps[Idx].clear();
+        NewOps[Idx].push_back(AA::ValueAndContext{*Op, II.I.getCtxI()});
+      }
+
       // If we are not sure about any operand we are not sure about the entire
       // instruction, we'll wait.
-      if (!SimplifiedOp.has_value())
-        return true;
-
-      if (*SimplifiedOp)
-        NewOps[Idx] = *SimplifiedOp;
-      else
-        NewOps[Idx] = Op;
-
-      SomeSimplified |= (NewOps[Idx] != Op);
+      if (NewOps[Idx].empty())
+            return false;
       ++Idx;
     }
-
-    // We won't bother with the InstSimplify interface if we didn't simplify any
-    // operand ourselves.
-    if (!SomeSimplified)
-      return false;
 
     InformationCache &InfoCache = A.getInfoCache();
     Function *F = I.getFunction();
@@ -11281,14 +11272,35 @@ struct AAPotentialValuesFloating : AAPotentialValuesImpl {
 
     const DataLayout &DL = I.getModule()->getDataLayout();
     SimplifyQuery Q(DL, TLI, DT, AC, &I);
-    Value *NewV = simplifyInstructionWithOperands(&I, NewOps, Q);
-    if (!NewV || NewV == &I)
-      return false;
 
-    LLVM_DEBUG(dbgs() << "Generic inst " << I << " assumed simplified to "
-                      << *NewV << "\n");
-    Worklist.push_back({{*NewV, II.I.getCtxI()}, II.S});
-    return true;
+    bool Ret = false;
+    size_t Indices = 1;
+    for(const auto &Vec : NewOps)
+      Indices *= Vec.size();
+
+    SmallVector<Value *, 8> OpValues;
+    for (size_t Idx = 0; Idx < Indices; ++Idx) {
+      size_t Inner = Idx;
+      OpValues.clear();
+      for (const auto &Vec : NewOps) {
+            size_t VecIdx = Inner % Vec.size();
+            Inner /= Vec.size();
+            OpValues.push_back(Vec[VecIdx].getValue());
+      }
+
+      Value *NewV = simplifyInstructionWithOperands(&I, OpValues, Q);
+      if (!NewV || NewV == &I)
+            continue;
+
+      Ret = true;
+      addValue(A, getState(), *NewV, II.I.getCtxI(), II.S, getAnchorScope());
+
+      LLVM_DEBUG(dbgs() << "Generic inst " << I << " assumed simplified to "
+                        << *NewV << "\n");
+      Worklist.push_back({{*NewV, II.I.getCtxI()}, II.S});
+    }
+
+    return Ret;
   }
 
   bool simplifyInstruction(
