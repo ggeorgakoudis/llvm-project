@@ -295,7 +295,8 @@ public:
   ///
   /// The client will receive at most one callback (via either AddStream or
   /// Cache) for each task identifier.
-  Error run(AddStreamFn AddStream, FileCache Cache = nullptr);
+  Error run(AddStreamFn AddStream, FileCache Cache = nullptr,
+            bool ImportAll = false);
 
   /// Static method that returns a list of libcall symbols that can be generated
   /// by LTO but might not be visible from bitcode symbol table.
@@ -371,6 +372,9 @@ private:
     /// True if module contains the prevailing definition.
     bool Prevailing = false;
 
+    /// True if the symbol will be only imported by other modules.
+    bool IsInternalImport = false;
+
     /// Returns true if module contains the prevailing definition and symbol is
     /// an IR symbol. For example when module-level inline asm block is used,
     /// symbol can be prevailing in module but have no IR name.
@@ -428,7 +432,9 @@ private:
 
   Error runRegularLTO(AddStreamFn AddStream);
   Error runThinLTO(AddStreamFn AddStream, FileCache Cache,
-                   const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols);
+                   const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols,
+                   const DenseSet<GlobalValue::GUID> &OnlyImportGUIDs,
+                   bool ImportAll = false);
 
   Error checkPartiallySplit();
 
@@ -453,7 +459,7 @@ private:
 struct SymbolResolution {
   SymbolResolution()
       : Prevailing(0), FinalDefinitionInLinkageUnit(0), VisibleToRegularObj(0),
-        ExportDynamic(0), LinkerRedefined(0) {}
+        ExportDynamic(0), LinkerRedefined(0), IsInternalImport(0) {}
 
   /// The linker has chosen this definition of the symbol.
   unsigned Prevailing : 1;
@@ -472,6 +478,9 @@ struct SymbolResolution {
   /// Linker redefined version of the symbol which appeared in -wrap or -defsym
   /// linker option.
   unsigned LinkerRedefined : 1;
+
+  /// The symbol is to only imported and internalized by other modules.
+  unsigned IsInternalImport: 1;
 };
 
 } // namespace lto

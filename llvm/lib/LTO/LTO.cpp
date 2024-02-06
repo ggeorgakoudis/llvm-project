@@ -633,6 +633,11 @@ void LTO::addModuleToGlobalRes(ArrayRef<InputFile::Symbol> Syms,
       GlobalRes.IRName = std::string(Sym.getIRName());
     }
 
+    if (Res.IsInternalImport) {
+      GlobalRes.IsInternalImport = true;
+      GlobalRes.IRName = std::string(Sym.getIRName());
+    }
+
     // In rare occasion, the symbol used to initialize GlobalRes has a different
     // IRName from the inspected Symbol. This can happen on macOS + iOS, when a
     // symbol is referenced through its mangled name, say @"\01_symbol" while
@@ -1127,10 +1132,11 @@ Error LTO::checkPartiallySplit() {
   return Error::success();
 }
 
-Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
+Error LTO::run(AddStreamFn AddStream, FileCache Cache, bool ImportInternalizeAll) {
   // Compute "dead" symbols, we don't want to import/export these!
   DenseSet<GlobalValue::GUID> GUIDPreservedSymbols;
   DenseMap<GlobalValue::GUID, PrevailingType> GUIDPrevailingResolutions;
+  DenseSet<GlobalValue::GUID> GUIDInternalImports;
   for (auto &Res : GlobalResolutions) {
     // Normally resolution have IR name of symbol. We can do nothing here
     // otherwise. See comments in GlobalResolution struct for more details.
@@ -1145,6 +1151,9 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
 
     if (Res.second.ExportDynamic)
       DynamicExportSymbols.insert(GUID);
+
+    if (Res.second.IsInternalImport)
+      GUIDInternalImports.insert(GUID);
 
     GUIDPrevailingResolutions[GUID] =
         Res.second.Prevailing ? PrevailingType::Yes : PrevailingType::No;
@@ -1175,7 +1184,9 @@ Error LTO::run(AddStreamFn AddStream, FileCache Cache) {
 
   Error Result = runRegularLTO(AddStream);
   if (!Result)
-    Result = runThinLTO(AddStream, Cache, GUIDPreservedSymbols);
+    // TODO: force import.
+    Result = runThinLTO(AddStream, Cache, GUIDPreservedSymbols,
+                        GUIDInternalImports, ImportInternalizeAll);
 
   if (StatsFile)
     PrintStatisticsJSON(StatsFile->os());
@@ -1646,7 +1657,9 @@ ThinBackend lto::createWriteIndexesThinBackend(
 }
 
 Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
-                      const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols) {
+                      const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols,
+                      const DenseSet<GlobalValue::GUID> &GUIDInternalImports,
+                      bool ImportInternalizeAll) {
   LLVM_DEBUG(dbgs() << "Running ThinLTO\n");
   ThinLTO.CombinedIndex.releaseTemporaryMemory();
   timeTraceProfilerBegin("ThinLink", StringRef(""));
@@ -1746,21 +1759,44 @@ Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
   }
 
   if (Conf.OptLevel > 0)
+    // TODO: force import.
     ComputeCrossModuleImport(ThinLTO.CombinedIndex, ModuleToDefinedGVSummaries,
-                             isPrevailing, ImportLists, ExportLists);
+                             isPrevailing, ImportLists, ExportLists,
+                             ImportInternalizeAll);
+
+  // TEST: 2 kernels on different files call a chain of device functions scattered in 
+  // different files.
+  // TEST: use the LC teams linking problem example.
+  // TEST: try OpenMC, disable unity build https://github.com/jtramm/openmc_offloading_builder/tree/main, turn on
+  DenseSet<GlobalValue::GUID> ImportedToInternalizeGUIDs;
+  if (ImportInternalizeAll)
+    for (auto &I : ImportLists) {
+      auto &FunctionImportGUIDs = I.getSecond();
+      for (auto &II : FunctionImportGUIDs)
+        ImportedToInternalizeGUIDs.insert(II.second.begin(), II.second.end());
+    }
+
+  auto IsInternalizedImport = [&](GlobalValue::GUID GUID) {
+    return (ImportedToInternalizeGUIDs.contains(GUID));
+    //return GUIDInternalImports.count(GUID);
+  };
 
   // Figure out which symbols need to be internalized. This also needs to happen
   // at -O0 because summary-based DCE is implemented using internalization, and
   // we must apply DCE consistently with the full LTO module in order to avoid
   // undefined references during the final link.
   for (auto &Res : GlobalResolutions) {
+    auto GUID = GlobalValue::getGUID(
+        GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
+    if (IsInternalizedImport(GUID)) {
+      //dbgs() << "OnlyImportGUID insert " << Res.second.IRName << "=== \n";
+      continue;
+    }
     // If the symbol does not have external references or it is not prevailing,
     // then not need to mark it as exported from a ThinLTO partition.
     if (Res.second.Partition != GlobalResolution::External ||
         !Res.second.isPrevailingIRSymbol())
       continue;
-    auto GUID = GlobalValue::getGUID(
-        GlobalValue::dropLLVMManglingEscape(Res.second.IRName));
     // Mark exported unless index-based analysis determined it to be dead.
     if (ThinLTO.CombinedIndex.isGUIDLive(GUID))
       ExportedGUIDs.insert(GUID);
@@ -1777,6 +1813,8 @@ Error LTO::runThinLTO(AddStreamFn AddStream, FileCache Cache,
 
   auto isExported = [&](StringRef ModuleIdentifier, ValueInfo VI) {
     const auto &ExportList = ExportLists.find(ModuleIdentifier);
+    if (IsInternalizedImport(VI.getGUID()))
+      return false;
     return (ExportList != ExportLists.end() && ExportList->second.count(VI)) ||
            ExportedGUIDs.count(VI.getGUID());
   };

@@ -138,6 +138,9 @@ static cl::opt<bool>
     ImportAllIndex("import-all-index",
                    cl::desc("Import all external functions in index."));
 
+//#define LLVM_DEBUG(x) x
+//#undef NDEBUG
+
 // Load lazily a module from \p FileName in \p Context.
 static std::unique_ptr<Module> loadFile(const std::string &FileName,
                                         LLVMContext &Context) {
@@ -230,7 +233,8 @@ static const GlobalValueSummary *
 selectCallee(const ModuleSummaryIndex &Index,
              ArrayRef<std::unique_ptr<GlobalValueSummary>> CalleeSummaryList,
              unsigned Threshold, StringRef CallerModulePath,
-             FunctionImporter::ImportFailureReason &Reason) {
+             FunctionImporter::ImportFailureReason &Reason,
+             bool ImportAll = false) {
   auto QualifiedCandidates =
       qualifyCalleeCandidates(Index, CalleeSummaryList, CallerModulePath);
   for (auto QualifiedValue : QualifiedCandidates) {
@@ -240,14 +244,15 @@ selectCallee(const ModuleSummaryIndex &Index,
     auto *Summary =
         cast<FunctionSummary>(QualifiedValue.second->getBaseObject());
 
+    // TODO: force imports.
     if ((Summary->instCount() > Threshold) && !Summary->fflags().AlwaysInline &&
-        !ForceImportAll) {
+        !ForceImportAll && !ImportAll) {
       Reason = FunctionImporter::ImportFailureReason::TooLarge;
       continue;
     }
 
     // Don't bother importing if we can't inline it anyway.
-    if (Summary->fflags().NoInline && !ForceImportAll) {
+    if (Summary->fflags().NoInline && !ForceImportAll && !ImportAll) {
       Reason = FunctionImporter::ImportFailureReason::NoInline;
       continue;
     }
@@ -389,7 +394,8 @@ public:
   /// another module (that may require promotion).
   void computeImportForModule(const GVSummaryMapTy &DefinedGVSummaries,
                               StringRef ModName,
-                              FunctionImporter::ImportMapTy &ImportList);
+                              FunctionImporter::ImportMapTy &ImportList,
+                              bool ImportAll = false);
 };
 
 static const char *
@@ -426,7 +432,8 @@ static void computeImportForFunction(
     SmallVectorImpl<EdgeInfo> &Worklist, GlobalsImporter &GVImporter,
     FunctionImporter::ImportMapTy &ImportList,
     DenseMap<StringRef, FunctionImporter::ExportSetTy> *ExportLists,
-    FunctionImporter::ImportThresholdsTy &ImportThresholds) {
+    FunctionImporter::ImportThresholdsTy &ImportThresholds,
+    bool ImportAll = false) {
   GVImporter.onImportingSummary(Summary);
   static int ImportCount = 0;
   for (const auto &Edge : Summary.calls()) {
@@ -505,8 +512,9 @@ static void computeImportForFunction(
       }
 
       FunctionImporter::ImportFailureReason Reason{};
+      // TODO: force imports.
       CalleeSummary = selectCallee(Index, VI.getSummaryList(), NewThreshold,
-                                   Summary.modulePath(), Reason);
+                                   Summary.modulePath(), Reason, ImportAll);
       if (!CalleeSummary) {
         // Update with new larger threshold if this was a retry (otherwise
         // we would have already inserted with NewThreshold above). Also
@@ -527,7 +535,8 @@ static void computeImportForFunction(
           FailureInfo = std::make_unique<FunctionImporter::ImportFailureInfo>(
               VI, Edge.second.getHotness(), Reason, 1);
         }
-        if (ForceImportAll) {
+        // Do we want to consider that failed when ImportAll is set? Nope.
+        if (ForceImportAll /* || ImportAll*/) {
           std::string Msg = std::string("Failed to import function ") +
                             VI.name().str() + " due to " +
                             getFailureName(Reason);
@@ -548,6 +557,7 @@ static void computeImportForFunction(
       ResolvedCalleeSummary = cast<FunctionSummary>(CalleeSummary);
 
       assert((ResolvedCalleeSummary->fflags().AlwaysInline || ForceImportAll ||
+              ImportAll ||
               (ResolvedCalleeSummary->instCount() <= NewThreshold)) &&
              "selectCallee() didn't honor the threshold");
 
@@ -591,7 +601,7 @@ static void computeImportForFunction(
 
 void ModuleImportsManager::computeImportForModule(
     const GVSummaryMapTy &DefinedGVSummaries, StringRef ModName,
-    FunctionImporter::ImportMapTy &ImportList) {
+    FunctionImporter::ImportMapTy &ImportList, bool ImportAll) {
   // Worklist contains the list of function imported in this module, for which
   // we will analyse the callees and may import further down the callgraph.
   SmallVector<EdgeInfo, 128> Worklist;
@@ -617,9 +627,10 @@ void ModuleImportsManager::computeImportForModule(
       // Skip import for global variables
       continue;
     LLVM_DEBUG(dbgs() << "Initialize import for " << VI << "\n");
-    computeImportForFunction(*FuncSummary, Index, ImportInstrLimit,
-                             DefinedGVSummaries, IsPrevailing, Worklist, GVI,
-                             ImportList, ExportLists, ImportThresholds);
+    // TODO: force import.
+    computeImportForFunction(
+        *FuncSummary, Index, ImportInstrLimit, DefinedGVSummaries, IsPrevailing,
+        Worklist, GVI, ImportList, ExportLists, ImportThresholds, ImportAll);
   }
 
   // Process the newly imported functions and add callees to the worklist.
@@ -631,7 +642,7 @@ void ModuleImportsManager::computeImportForModule(
     if (auto *FS = dyn_cast<FunctionSummary>(Summary))
       computeImportForFunction(*FS, Index, Threshold, DefinedGVSummaries,
                                IsPrevailing, Worklist, GVI, ImportList,
-                               ExportLists, ImportThresholds);
+                               ExportLists, ImportThresholds, ImportAll);
   }
 
   // Print stats about functions considered but rejected for importing
@@ -731,15 +742,17 @@ void llvm::ComputeCrossModuleImport(
     function_ref<bool(GlobalValue::GUID, const GlobalValueSummary *)>
         isPrevailing,
     DenseMap<StringRef, FunctionImporter::ImportMapTy> &ImportLists,
-    DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists) {
+    DenseMap<StringRef, FunctionImporter::ExportSetTy> &ExportLists,
+    bool ImportAll) {
   ModuleImportsManager MIS(isPrevailing, Index, &ExportLists);
   // For each module that has function defined, compute the import/export lists.
   for (const auto &DefinedGVSummaries : ModuleToDefinedGVSummaries) {
     auto &ImportList = ImportLists[DefinedGVSummaries.first];
     LLVM_DEBUG(dbgs() << "Computing import for Module '"
                       << DefinedGVSummaries.first << "'\n");
+    // TODO: force import.
     MIS.computeImportForModule(DefinedGVSummaries.second,
-                               DefinedGVSummaries.first, ImportList);
+                               DefinedGVSummaries.first, ImportList, ImportAll);
   }
 
   // When computing imports we only added the variables and functions being
