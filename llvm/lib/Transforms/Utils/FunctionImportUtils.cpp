@@ -12,7 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/FunctionImportUtils.h"
+#include "llvm/IR/CallingConv.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
 using namespace llvm;
 
 /// Uses the "source_filename" instead of a Module hash ID for the suffix of
@@ -139,6 +145,8 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
   if (!isPerformingImport())
     return SGV->getLinkage();
 
+  dbgs() << "SWITCH SGV " << SGV->getName() << " getLinkage "
+         << SGV->getLinkage() << " Module " << SGV->getParent()->getName() << " ";
   switch (SGV->getLinkage()) {
   case GlobalValue::LinkOnceODRLinkage:
   case GlobalValue::ExternalLinkage:
@@ -146,17 +154,24 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
     // definitions upon import, so that they are available for inlining
     // and/or optimization, but are turned into declarations later
     // during the EliminateAvailableExternally pass.
-    if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV))
+    if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV)) {
+      dbgs() << __FILE__ " : " << __LINE__ << " AvlExt\n";
       return GlobalValue::AvailableExternallyLinkage;
+    }
+
+    dbgs() << __FILE__ " : " << __LINE__ << " " << SGV->getLinkage() << "\n";
     // An imported external declaration stays external.
     return SGV->getLinkage();
 
   case GlobalValue::AvailableExternallyLinkage:
     // An imported available_externally definition converts
     // to external if imported as a declaration.
-    if (!doImportAsDefinition(SGV))
+    if (!doImportAsDefinition(SGV)) {
+      dbgs() << __FILE__ " : " << __LINE__ << " Ext\n";
       return GlobalValue::ExternalLinkage;
+    }
     // An imported available_externally declaration stays that way.
+    dbgs() << __FILE__ " : " << __LINE__ << SGV->getLinkage() << "\n";
     return SGV->getLinkage();
 
   case GlobalValue::LinkOnceAnyLinkage:
@@ -168,6 +183,7 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
     // this.
     assert(!doImportAsDefinition(SGV));
     // If imported as a declaration, it becomes external_weak.
+    dbgs() << __FILE__ " : " << __LINE__ << SGV->getLinkage() << "\n";
     return SGV->getLinkage();
 
   case GlobalValue::WeakODRLinkage:
@@ -175,10 +191,14 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
     // equivalent, so the issue described above for weak_any does not exist,
     // and the definition can be imported. It can be treated similarly
     // to an imported externally visible global value.
-    if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV))
+    if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV)) {
+      dbgs() << __FILE__ " : " << __LINE__ << " AvlExt\n";
       return GlobalValue::AvailableExternallyLinkage;
-    else
+    }
+    else {
+      dbgs() << __FILE__ " : " << __LINE__ << " External\n";
       return GlobalValue::ExternalLinkage;
+    }
 
   case GlobalValue::AppendingLinkage:
     // It would be incorrect to import an appending linkage variable,
@@ -193,11 +213,16 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
     // If we are promoting the local to global scope, it is handled
     // similarly to a normal externally visible global.
     if (DoPromote) {
-      if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV))
+      if (doImportAsDefinition(SGV) && !isa<GlobalAlias>(SGV)) {
+        dbgs() << __FILE__ " : " << __LINE__ << " AvlExt\n";
         return GlobalValue::AvailableExternallyLinkage;
-      else
+      }
+      else {
+        dbgs() << __FILE__ " : " << __LINE__ << " External\n";
         return GlobalValue::ExternalLinkage;
+      }
     }
+    dbgs() << __FILE__ " : " << __LINE__ << SGV->getLinkage() << "\n";
     // A non-promoted imported local definition stays local.
     // The ThinLTO pass will eventually force-import their definitions.
     return SGV->getLinkage();
@@ -205,10 +230,12 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
   case GlobalValue::ExternalWeakLinkage:
     // External weak doesn't apply to definitions, must be a declaration.
     assert(!doImportAsDefinition(SGV));
+    dbgs() << __FILE__ " : " << __LINE__ << SGV->getLinkage() << "\n";
     // Linkage stays external_weak.
     return SGV->getLinkage();
 
   case GlobalValue::CommonLinkage:
+    dbgs() << __FILE__ " : " << __LINE__ << SGV->getLinkage() << "\n";
     // Linkage stays common on definitions.
     // The ThinLTO pass will eventually force-import their definitions.
     return SGV->getLinkage();
@@ -219,6 +246,8 @@ FunctionImportGlobalProcessing::getLinkage(const GlobalValue *SGV,
 
 void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
 
+  dbgs() << "= processGlobalForThinLTO GV " << GV.getName() << " Module "
+         << GV.getParent()->getName() << "\n";
   ValueInfo VI;
   if (GV.hasName()) {
     VI = ImportIndex.getValueInfo(GV.getGUID());
@@ -285,6 +314,8 @@ void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
   if (GV.hasLocalLinkage() && shouldPromoteLocalToGlobal(&GV, VI)) {
     // Save the original name string before we rename GV below.
     auto Name = GV.getName().str();
+    dbgs() << "Promotes local " << Name << " to global in Module"
+           << GV.getParent()->getName() << "\n";
     GV.setName(getPromotedName(&GV));
     GV.setLinkage(getLinkage(&GV, /* DoPromote */ true));
     assert(!GV.hasLocalLinkage());
@@ -295,8 +326,11 @@ void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
     if (const auto *C = GV.getComdat())
       if (C->getName() == Name)
         RenamedComdats.try_emplace(C, M.getOrInsertComdat(GV.getName()));
-  } else
+  } else {
+    dbgs() << "WITHOUT promotion for GV " << GV.getName() << " Module "
+           << GV.getParent()->getName() << "\n";
     GV.setLinkage(getLinkage(&GV, /* DoPromote */ false));
+  }
 
   // When ClearDSOLocalOnDeclarations is true, clear dso_local if GV is
   // converted to a declaration, to disable direct access. Don't do this if GV
@@ -326,6 +360,10 @@ void FunctionImportGlobalProcessing::processGlobalForThinLTO(GlobalValue &GV) {
            "Expected comdat on definition (possibly available external)");
     GO->setComdat(nullptr);
   }
+
+
+  dbgs() << "= END processGlobalForThinLTO GV " << GV.getName() << " Module "
+         << GV.getParent()->getName() << "\n";
 }
 
 void FunctionImportGlobalProcessing::processGlobalsForThinLTO() {

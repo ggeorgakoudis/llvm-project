@@ -17,10 +17,15 @@
 #include "OffloadWrapper.h"
 #include "clang/Basic/Version.h"
 #include "llvm/BinaryFormat/Magic.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/CodeGen/CommandFlags.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DiagnosticPrinter.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/LTO/LTO.h"
@@ -52,6 +57,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include <atomic>
 #include <optional>
 
@@ -522,6 +528,7 @@ std::unique_ptr<lto::LTO> createLTO(
   lto::ThinBackend Backend;
   // TODO: Handle index-only thin-LTO
   Backend =
+      // TODO: remove 1, used for debugging.
       lto::createInProcessThinBackend(llvm::heavyweight_hardware_concurrency());
 
   Conf.CPU = Arch.str();
@@ -547,6 +554,20 @@ std::unique_ptr<lto::LTO> createLTO(
     std::string TempName = (sys::path::filename(ExecutableName) + "." +
                             Triple.getTriple() + "." + Arch)
                                .str();
+    Conf.PostImportModuleHook = [=](size_t Task, const Module &M) {
+      dbgs() << "Task " << Task << "\n";
+      // getchar();
+      std::string File =
+          !Task ? TempName + ".postimport.bc"
+                : TempName + "." + std::to_string(Task) + ".postimport.bc";
+      error_code EC;
+      raw_fd_ostream LinkedBitcode(File, EC, sys::fs::OF_None);
+      if (EC)
+        reportError(errorCodeToError(EC));
+      WriteBitcodeToFile(M, LinkedBitcode);
+      return true;
+    };
+
     Conf.PostInternalizeModuleHook = [=](size_t Task, const Module &M) {
       std::string File =
           !Task ? TempName + ".postlink.bc"
@@ -587,6 +608,46 @@ bool isValidCIdentifier(StringRef S) {
   return !S.empty() && (isAlpha(S[0]) || S[0] == '_') &&
          llvm::all_of(llvm::drop_begin(S),
                       [](char C) { return C == '_' || isAlnum(C); });
+}
+
+std::set<std::string> KernelSet;
+static void collectDeviceKernels(MemoryBufferRef ModuleBuffer) {
+  LLVMContext Context;
+  auto ModuleOrErr = parseBitcodeFile(ModuleBuffer, Context);
+  if (!ModuleOrErr)
+    reportError(ModuleOrErr.takeError());
+  auto &Module = *ModuleOrErr;
+  // Add CUDA kernels.
+  NamedMDNode *MD = Module->getOrInsertNamedMetadata("nvvm.annotations");
+  if (MD)
+    for (auto *Op : MD->operands()) {
+      if (Op->getNumOperands() < 2)
+        continue;
+      MDString *KindID = dyn_cast<MDString>(Op->getOperand(1));
+      if (!KindID || KindID->getString() != "kernel")
+        continue;
+
+      Function *KernelFn =
+          mdconst::dyn_extract_or_null<Function>(Op->getOperand(0));
+      if (!KernelFn)
+        continue;
+
+      assert(KernelFn->hasName() && "Expected named kernel function");
+      KernelSet.insert(KernelFn->getName().str());
+    }
+
+  for (Function &F : *Module) {
+    // Check if it is an AMD GPU kernel by the calling convention or an OpenMP
+    // kernel by attribute.
+    if ((F.getCallingConv() == CallingConv::AMDGPU_KERNEL) || (F.hasFnAttribute("kernel"))) {
+      assert(F.hasName() && "Expected named kernel function");
+      KernelSet.insert(F.getName().str());
+    }
+  }
+}
+
+static bool isDeviceKernel(StringRef GlobalIRName) {
+  return KernelSet.count(GlobalIRName.str());
 }
 
 Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
@@ -695,6 +756,48 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
         BitcodeInput.getBinary()->getMemoryBufferRef().getBufferIdentifier());
     MemoryBufferRef Buffer =
         MemoryBufferRef(BitcodeInput.getBinary()->getImage(), Identifier);
+
+    if(SaveTemps) {
+      std::error_code EC;
+      raw_fd_ostream OS((Identifier + ".input.bc").str(), EC);
+      if(EC)
+        reportError(errorCodeToError(EC));
+      OS << Buffer.getBuffer();
+    }
+
+    collectDeviceKernels(Buffer);
+
+    auto PrintSymbol = [](const lto::InputFile::Symbol &Sym,
+                          lto::SymbolResolution &Res) {
+      switch (Sym.getVisibility()) {
+      case GlobalValue::HiddenVisibility:
+        dbgs() << 'H';
+        break;
+      case GlobalValue::ProtectedVisibility:
+        dbgs() << 'P';
+        break;
+      case GlobalValue::DefaultVisibility:
+        dbgs() << 'D';
+        break;
+      }
+
+      auto PrintBool = [&](char C, bool B) { dbgs() << (B ? C : '-'); };
+      PrintBool('U', Sym.isUndefined());
+      PrintBool('C', Sym.isCommon());
+      PrintBool('W', Sym.isWeak());
+      PrintBool('I', Sym.isIndirect());
+      PrintBool('O', Sym.canBeOmittedFromSymbolTable());
+      PrintBool('T', Sym.isTLS());
+      PrintBool('X', Sym.isExecutable());
+      dbgs() << ' ' << Sym.getName();
+      dbgs() << "| P " << Res.Prevailing;
+      dbgs() << " V " << Res.VisibleToRegularObj;
+      dbgs() << " E " << Res.ExportDynamic;
+      dbgs() << " F " << Res.FinalDefinitionInLinkageUnit;
+      dbgs() << " I " << Res.IsInternalImport;
+      dbgs() << "\n";
+    };
+
     Expected<std::unique_ptr<lto::InputFile>> BitcodeFileOrErr =
         llvm::lto::InputFile::create(Buffer);
     if (!BitcodeFileOrErr)
@@ -742,6 +845,11 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
       // We do not support linker redefined symbols (e.g. --wrap) for device
       // image linking, so the symbols will not be changed after LTO.
       Res.LinkerRedefined = false;
+
+      Res.IsInternalImport =
+          !isDeviceKernel(Sym.getIRName()) && !Sym.isWeak();
+
+      //PrintSymbol(Sym, Res);
     }
 
     // Add the bitcode file with its resolved symbols to the LTO job.
@@ -772,7 +880,8 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
         std::make_unique<llvm::raw_fd_ostream>(FD, true));
   };
 
-  if (Error Err = LTOBackend->run(AddStream))
+  // TODO: force import.
+  if (Error Err = LTOBackend->run(AddStream, nullptr, true))
     return Err;
 
   if (LTOError)
