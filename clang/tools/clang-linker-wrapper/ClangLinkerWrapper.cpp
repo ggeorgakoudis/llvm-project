@@ -522,6 +522,7 @@ std::unique_ptr<lto::LTO> createLTO(
   lto::ThinBackend Backend;
   // TODO: Handle index-only thin-LTO
   Backend =
+      // GG: use 1 for debugging.
       lto::createInProcessThinBackend(llvm::heavyweight_hardware_concurrency());
 
   Conf.CPU = Arch.str();
@@ -547,6 +548,18 @@ std::unique_ptr<lto::LTO> createLTO(
     std::string TempName = (sys::path::filename(ExecutableName) + "." +
                             Triple.getTriple() + "." + Arch)
                                .str();
+    Conf.PostImportModuleHook = [=](size_t Task, const Module &M) {
+      std::string File =
+          !Task ? TempName + ".postimport.bc"
+                : TempName + "." + std::to_string(Task) + ".postimport.bc";
+      error_code EC;
+      raw_fd_ostream LinkedBitcode(File, EC, sys::fs::OF_None);
+      if (EC)
+        reportError(errorCodeToError(EC));
+      WriteBitcodeToFile(M, LinkedBitcode);
+      return true;
+    };
+
     Conf.PostInternalizeModuleHook = [=](size_t Task, const Module &M) {
       std::string File =
           !Task ? TempName + ".postlink.bc"
@@ -695,6 +708,45 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
         BitcodeInput.getBinary()->getMemoryBufferRef().getBufferIdentifier());
     MemoryBufferRef Buffer =
         MemoryBufferRef(BitcodeInput.getBinary()->getImage(), Identifier);
+
+    if(SaveTemps) {
+      std::error_code EC;
+      raw_fd_ostream OS((Identifier + ".input.bc").str(), EC);
+      if(EC)
+        reportError(errorCodeToError(EC));
+      OS << Buffer.getBuffer();
+    }
+
+    auto PrintSymbol = [](const lto::InputFile::Symbol &Sym,
+                          lto::SymbolResolution &Res) {
+      switch (Sym.getVisibility()) {
+      case GlobalValue::HiddenVisibility:
+        dbgs() << 'H';
+        break;
+      case GlobalValue::ProtectedVisibility:
+        dbgs() << 'P';
+        break;
+      case GlobalValue::DefaultVisibility:
+        dbgs() << 'D';
+        break;
+      }
+
+      auto PrintBool = [&](char C, bool B) { dbgs() << (B ? C : '-'); };
+      PrintBool('U', Sym.isUndefined());
+      PrintBool('C', Sym.isCommon());
+      PrintBool('W', Sym.isWeak());
+      PrintBool('I', Sym.isIndirect());
+      PrintBool('O', Sym.canBeOmittedFromSymbolTable());
+      PrintBool('T', Sym.isTLS());
+      PrintBool('X', Sym.isExecutable());
+      dbgs() << ' ' << Sym.getName();
+      dbgs() << "| P " << Res.Prevailing;
+      dbgs() << " V " << Res.VisibleToRegularObj;
+      dbgs() << " E " << Res.ExportDynamic;
+      dbgs() << " F " << Res.FinalDefinitionInLinkageUnit;
+      dbgs() << "\n";
+    };
+
     Expected<std::unique_ptr<lto::InputFile>> BitcodeFileOrErr =
         llvm::lto::InputFile::create(Buffer);
     if (!BitcodeFileOrErr)
@@ -742,6 +794,8 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
       // We do not support linker redefined symbols (e.g. --wrap) for device
       // image linking, so the symbols will not be changed after LTO.
       Res.LinkerRedefined = false;
+      // GG: debug output.
+      //PrintSymbol(Sym, Res);
     }
 
     // Add the bitcode file with its resolved symbols to the LTO job.
@@ -772,7 +826,8 @@ Error linkBitcodeFiles(SmallVectorImpl<OffloadFile> &InputFiles,
         std::make_unique<llvm::raw_fd_ostream>(FD, true));
   };
 
-  if (Error Err = LTOBackend->run(AddStream))
+  // GG: force import all.
+  if (Error Err = LTOBackend->run(AddStream, nullptr, true))
     return Err;
 
   if (LTOError)
